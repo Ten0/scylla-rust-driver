@@ -1,4 +1,4 @@
-use crate::frame::frame_errors::ParseError;
+use crate::frame::{frame_errors::ParseError, value::ValueList};
 use bytes::{BufMut, Bytes};
 use std::convert::TryInto;
 
@@ -14,8 +14,9 @@ const FLAG_WITH_DEFAULT_TIMESTAMP: u8 = 0x20;
 
 pub struct Batch<'a, StatementsIter, Values>
 where
+    // It is expected that both of these iterators have the same size
     StatementsIter: Iterator<Item = BatchStatement<'a>> + Clone,
-    Values: BatchValues,
+    Values: for<'v> BatchValues<'v>,
 {
     pub statements: StatementsIter,
     pub statements_count: usize,
@@ -42,8 +43,10 @@ pub enum BatchStatement<'a> {
 
 impl<'a, StatementsIter, Values> Request for Batch<'a, StatementsIter, Values>
 where
-    StatementsIter: Iterator<Item = BatchStatement<'a>> + Clone,
-    Values: BatchValues,
+    StatementsIter: ExactSizeIterator<Item = BatchStatement<'a>> + Clone,
+    Values: for<'v> BatchValues<'v>,
+    // boilerplate trait bounds that the compiler can't infer
+    for<'v> <<Values as BatchValues<'v>>::ValuesIter as Iterator>::Item: ValueList,
 {
     const OPCODE: RequestOpcode = RequestOpcode::Batch;
 
@@ -54,9 +57,16 @@ where
         // Serializing queries
         types::write_short(self.statements_count.try_into()?, buf);
 
-        for (statement_num, statement) in self.statements.clone().enumerate() {
+        let mut n_serialized_statements = 0usize;
+        for (statement, value_list) in self.statements.clone().zip(self.values.values_iter()) {
             statement.serialize(buf)?;
-            self.values.write_nth_to_request(statement_num, buf)?;
+            value_list.write_to_request(buf)?;
+            n_serialized_statements += 1;
+        }
+        if n_serialized_statements != self.statements_count {
+            return Err(ParseError::BadDataToSerialize(
+                "Mismatch between statement counts for batch query".to_owned(),
+            ));
         }
 
         // Serializing consistency

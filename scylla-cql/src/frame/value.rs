@@ -100,18 +100,12 @@ pub trait ValueList {
 }
 
 /// Represents List of ValueList for Batch statement
-pub trait BatchValues {
-    fn len(&self) -> usize;
-
-    fn write_nth_to_request(
-        &self,
-        n: usize,
-        buf: &mut impl BufMut,
-    ) -> Result<(), SerializeValuesError>;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
+pub trait BatchValues<'r>
+where
+    <Self::ValuesIter as Iterator>::Item: ValueList,
+{
+    type ValuesIter: ExactSizeIterator;
+    fn values_iter(&'r self) -> Self::ValuesIter;
 }
 
 impl SerializedValues {
@@ -806,117 +800,131 @@ impl<'b> ValueList for Cow<'b, SerializedValues> {
 //
 
 // Implement BatchValues for slices of ValueList types
-impl<T: ValueList> BatchValues for &[T] {
-    fn len(&self) -> usize {
-        <[T]>::len(*self)
-    }
-
-    fn write_nth_to_request(
-        &self,
-        n: usize,
-        buf: &mut impl BufMut,
-    ) -> Result<(), SerializeValuesError> {
-        self[n].write_to_request(buf)?;
-        Ok(())
+impl<'r, 'a, T: ValueList> BatchValues<'r> for &'a [T] {
+    type ValuesIter = std::slice::Iter<'a, T>;
+    fn values_iter(&'r self) -> Self::ValuesIter {
+        self.iter()
     }
 }
 
 // Implement BatchValues for Vec<ValueList>
-impl<T: ValueList> BatchValues for Vec<T> {
-    fn len(&self) -> usize {
-        Vec::<T>::len(self)
-    }
-
-    fn write_nth_to_request(
-        &self,
-        n: usize,
-        buf: &mut impl BufMut,
-    ) -> Result<(), SerializeValuesError> {
-        self[n].write_to_request(buf)?;
-        Ok(())
+impl<'r, T: ValueList + 'r> BatchValues<'r> for Vec<T> {
+    type ValuesIter = std::slice::Iter<'r, T>;
+    fn values_iter(&'r self) -> Self::ValuesIter {
+        self.as_slice().values_iter()
     }
 }
 
 // Here is an example implementation for (T0, )
 // Further variants are done using a macro
-impl<T0: ValueList> BatchValues for (T0,) {
-    fn len(&self) -> usize {
-        1
-    }
-
-    fn write_nth_to_request(
-        &self,
-        n: usize,
-        buf: &mut impl BufMut,
-    ) -> Result<(), SerializeValuesError> {
-        match n {
-            0 => self.0.write_to_request(buf)?,
-            _ => panic!("Tried to serialize ValueList with an out of range index! index: {}, ValueList len: {}", n, 1),
-        };
-
-        Ok(())
+impl<'r, T0: ValueList + 'r> BatchValues<'r> for (T0,) {
+    type ValuesIter = std::iter::Once<&'r T0>;
+    fn values_iter(&'r self) -> Self::ValuesIter {
+        std::iter::once(&self.0)
     }
 }
 
-macro_rules! impl_batch_values_for_tuple {
-    ( $($Ti:ident),* ; $($FieldI:tt),* ; $TupleSize:tt ) => {
-        impl<$($Ti),+> BatchValues for ($($Ti,)+)
+pub struct TupleValuesIter<'a, T> {
+    tuple: &'a T,
+    idx: usize,
+}
+
+pub mod impl_batch_values_for_tuple {
+    use super::*;
+
+    macro_rules! impl_batch_values_for_tuple {
+    ( $($Ti:ident),* ; $($FieldI:tt),* ; $TupleSize:tt; $EnumName:ident ) => {
+        impl<'r, $($Ti),+> BatchValues<'r> for ($($Ti,)+)
         where
-        $($Ti: ValueList),+
+            $($Ti: ValueList + 'r),+
         {
-            fn len(&self) -> usize{
-                $TupleSize
-            }
-
-            fn write_nth_to_request(&self, n: usize, buf: &mut impl BufMut) -> Result<(), SerializeValuesError> {
-                match n {
-                    $(
-                        $FieldI => self.$FieldI.write_to_request(buf) ?,
-                    )*
-                    _ => panic!("Tried to serialize ValueList with an out of range index! index: {}, ValueList len: {}", n, $TupleSize),
+            type ValuesIter = TupleValuesIter<'r, ($($Ti,)+)>;
+            fn values_iter(&'r self) -> Self::ValuesIter {
+                TupleValuesIter {
+                    tuple: self,
+                    idx: 0,
                 }
-
-                Ok(())
+            }
+        }
+        pub enum $EnumName<'r, $($Ti,)+> {
+            $($Ti(&'r $Ti),)*
+        }
+        impl<$($Ti),+> ValueList for $EnumName<'_, $($Ti,)+>
+        where
+            $($Ti: ValueList),+
+        {
+            fn serialized(&self) -> SerializedResult<'_> {
+                match self {
+                    $(
+                        Self::$Ti(vl) => vl.serialized(),
+                    )+
+                }
+            }
+            fn write_to_request(&self, buf: &mut impl BufMut) -> Result<(), SerializeValuesError> {
+                match self {
+                    $(
+                        Self::$Ti(vl) => vl.write_to_request(buf),
+                    )+
+                }
+            }
+        }
+        impl<'r, $($Ti),+> Iterator for TupleValuesIter<'r, ($($Ti,)+)> {
+            type Item = $EnumName<'r, $($Ti,)+>;
+            fn next(&mut self) -> Option<Self::Item> {
+                let ret = match self.idx {
+                    $(
+                        $FieldI => $EnumName::$Ti(&self.tuple.$FieldI),
+                    )*
+                    _ => return None,
+                };
+                self.idx += 1;
+                Some(ret)
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                let l = self.len();
+                (l, Some(l))
+            }
+        }
+        impl<'r, $($Ti),+> ExactSizeIterator for TupleValuesIter<'r, ($($Ti,)+)> {
+            fn len(&self) -> usize{
+                $TupleSize - self.idx
             }
         }
     }
 }
 
-impl_batch_values_for_tuple!(T0, T1; 0, 1; 2);
-impl_batch_values_for_tuple!(T0, T1, T2; 0, 1, 2; 3);
-impl_batch_values_for_tuple!(T0, T1, T2, T3; 0, 1, 2, 3; 4);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4; 0, 1, 2, 3, 4; 5);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5; 0, 1, 2, 3, 4, 5; 6);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6; 0, 1, 2, 3, 4, 5, 6; 7);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7; 0, 1, 2, 3, 4, 5, 6, 7; 8);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8; 0, 1, 2, 3, 4, 5, 6, 7, 8; 9);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9; 10);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10; 11);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11; 12);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12; 13);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13; 14);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14; 15);
-impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15;
-                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15; 16);
+    impl_batch_values_for_tuple!(T0, T1; 0, 1; 2; ValueList2);
+    impl_batch_values_for_tuple!(T0, T1, T2; 0, 1, 2; 3; ValueList3);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3; 0, 1, 2, 3; 4; ValueList4);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4; 0, 1, 2, 3, 4; 5; ValueList5);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5; 0, 1, 2, 3, 4, 5; 6; ValueList6);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6; 0, 1, 2, 3, 4, 5, 6; 7; ValueList7);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7; 0, 1, 2, 3, 4, 5, 6, 7; 8; ValueList8);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8; 0, 1, 2, 3, 4, 5, 6, 7, 8; 9; ValueList9);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9; 10; ValueList10);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10; 11; ValueList11);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11; 12; ValueList12);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12; 13; ValueList13);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13; 14; ValueList14);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14; 15; ValueList15);
+    impl_batch_values_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15;
+                             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15; 16; ValueList16);
+}
 
 // Every &impl BatchValues should also implement BatchValues
-impl<T: BatchValues> BatchValues for &T {
-    fn len(&self) -> usize {
-        <T as BatchValues>::len(*self)
-    }
-
-    fn write_nth_to_request(
-        &self,
-        n: usize,
-        buf: &mut impl BufMut,
-    ) -> Result<(), SerializeValuesError> {
-        <T as BatchValues>::write_nth_to_request(*self, n, buf)?;
-        Ok(())
+impl<'r, 'a, T: BatchValues<'a>> BatchValues<'r> for &'a T
+where
+    // boilerplate trait bounds that the compiler can't infer
+    <<T as BatchValues<'a>>::ValuesIter as Iterator>::Item: ValueList,
+{
+    type ValuesIter = <T as BatchValues<'a>>::ValuesIter;
+    fn values_iter(&'r self) -> Self::ValuesIter {
+        <T as BatchValues<'a>>::values_iter(*self)
     }
 }

@@ -1,6 +1,7 @@
 //! `Session` is the main object used in the driver.\
 //! It manages all connections to the cluster and allows to perform queries.
 
+use crate::batch::BatchStatement;
 use crate::frame::types::LegacyConsistency;
 use bytes::Bytes;
 use futures::future::join_all;
@@ -871,6 +872,13 @@ impl Session {
     ) -> Result<BatchResult, QueryError> {
         let values_ref = &values;
 
+        /*  let first_statement_prepared = match batch.statements.get(0) {
+            Some(BatchStatement::PreparedStatement(prepared_statement)) => Some(prepared_statement),
+            _ => None,
+        };
+        let first_serialized_values
+        let token = match batch.statements.get(0), !values.is_empty().then(||{self.calculate_token(batch, &serialized_values)?;*/
+
         self.run_query(
             Statement::default(),
             &batch.config,
@@ -1315,7 +1323,7 @@ impl Session {
         .await
     }
 
-    fn calculate_token(
+    pub fn calculate_token(
         &self,
         prepared: &PreparedStatement,
         serialized_values: &SerializedValues,

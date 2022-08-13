@@ -391,7 +391,7 @@ fn cow_serialized_values_value_list() {
 fn slice_batch_values() {
     let batch_values: &[&[i8]] = &[&[1, 2], &[2, 3, 4, 5], &[6]];
 
-    assert_eq!(<&[&[i8]] as BatchValues>::len(&batch_values), 3);
+    assert_eq!(batch_values.values_iter().len(), 3);
 
     {
         let mut request: Vec<u8> = Vec::new();
@@ -419,7 +419,7 @@ fn slice_batch_values() {
 fn vec_batch_values() {
     let batch_values: Vec<Vec<i8>> = vec![vec![1, 2], vec![2, 3, 4, 5], vec![6]];
 
-    assert_eq!(<Vec<Vec<i8>> as BatchValues>::len(&batch_values), 3);
+    assert_eq!(batch_values.values_iter().len(), 3);
 
     {
         let mut request: Vec<u8> = Vec::new();
@@ -445,12 +445,20 @@ fn vec_batch_values() {
 
 #[test]
 fn tuple_batch_values() {
-    fn check_twoi32_tuple(tuple: impl BatchValues, size: usize) {
-        assert_eq!(tuple.len(), size);
+    fn check_twoi32_tuple<T>(tuple: T, size: usize)
+    where
+        T: for<'r> BatchValues<'r>,
+        /*for<'r> <T as BatchValues<'r>>::ValuesIter: Iterator<
+            Item = crate::frame::value::impl_batch_values_for_tuple::ValueList2<'r, i32, i32>,
+        >,*/
+        for<'r> <<T as BatchValues<'r>>::ValuesIter as Iterator>::Item: ValueList,
+    {
+        let mut iter = tuple.values_iter();
+        assert_eq!(iter.len(), size);
 
-        for i in 0..size {
+        for (i, vl) in iter.enumerate() {
             let mut request: Vec<u8> = Vec::new();
-            tuple.write_nth_to_request(i, &mut request).unwrap();
+            vl.write_to_request(&mut request).unwrap();
 
             let mut expected: Vec<u8> = Vec::new();
             let i: i32 = i.try_into().unwrap();
