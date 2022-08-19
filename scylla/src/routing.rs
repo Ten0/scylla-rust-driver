@@ -12,7 +12,7 @@ pub struct Node {
     pub addr: SocketAddr,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Debug)]
 pub struct Token {
     pub value: i64,
 }
