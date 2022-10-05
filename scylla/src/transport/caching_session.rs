@@ -70,7 +70,7 @@ impl CachingSession {
 
     /// Does the same thing as [`Session::batch`] but uses the prepared statement cache\
     /// Prepares batch using CachingSession::prepare_batch if needed and then executes it
-    pub async fn batch(
+    pub async fn batch<'a>(
         &self,
         batch: &Batch,
         values: impl BatchValues,
