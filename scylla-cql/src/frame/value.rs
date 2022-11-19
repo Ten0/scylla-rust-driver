@@ -219,11 +219,11 @@ impl<'a> Iterator for SerializedValuesIterator<'a> {
 ///
 /// This trait is not implemented directly, but rather implemented through `BatchValuesGatWorkaround`
 /// (until GATs are made available in Rust)
-pub trait BatchValues: for<'r> BatchValuesGatWorkaround<'r> {}
-impl<T: for<'r> BatchValuesGatWorkaround<'r> + ?Sized> BatchValues for T {}
+pub trait BatchValues: Send + Sync + for<'r> BatchValuesGatWorkaround<'r> {}
+impl<T: Send + Sync + for<'r> BatchValuesGatWorkaround<'r> + ?Sized> BatchValues for T {}
 
 pub trait BatchValuesGatWorkaround<'r, ImplicitBounds = &'r Self> {
-    type BatchValuesIter: BatchValuesIterator<'r>;
+    type BatchValuesIter: BatchValuesIterator<'r> + 'r + Send + Sync;
     fn batch_values_iter(&'r self) -> Self::BatchValuesIter;
 }
 
@@ -905,6 +905,7 @@ impl<'r, 'a: 'r, IT, VL> BatchValuesGatWorkaround<'r> for BatchValuesFromIter<IT
 where
     IT: Iterator<Item = &'a VL> + Clone,
     VL: ValueList + 'a,
+    IT: Send + Sync,
 {
     type BatchValuesIter = BatchValuesIteratorFromIterator<IT>;
     fn batch_values_iter(&'r self) -> Self::BatchValuesIter {
@@ -913,7 +914,10 @@ where
 }
 
 // Implement BatchValues for slices of ValueList types
-impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for [T] {
+impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for [T]
+where
+    T: Send + Sync,
+{
     type BatchValuesIter = BatchValuesIteratorFromIterator<std::slice::Iter<'r, T>>;
     fn batch_values_iter(&'r self) -> Self::BatchValuesIter {
         self.iter().into()
@@ -921,7 +925,10 @@ impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for [T] {
 }
 
 // Implement BatchValues for Vec<ValueList>
-impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for Vec<T> {
+impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for Vec<T>
+where
+    T: Send + Sync,
+{
     type BatchValuesIter = BatchValuesIteratorFromIterator<std::slice::Iter<'r, T>>;
     fn batch_values_iter(&'r self) -> Self::BatchValuesIter {
         BatchValuesGatWorkaround::batch_values_iter(self.as_slice())
@@ -930,7 +937,10 @@ impl<'r, T: ValueList> BatchValuesGatWorkaround<'r> for Vec<T> {
 
 // Here is an example implementation for (T0, )
 // Further variants are done using a macro
-impl<'r, T0: ValueList> BatchValuesGatWorkaround<'r> for (T0,) {
+impl<'r, T0: ValueList> BatchValuesGatWorkaround<'r> for (T0,)
+where
+    T0: Send + Sync,
+{
     type BatchValuesIter = BatchValuesIteratorFromIterator<std::iter::Once<&'r T0>>;
     fn batch_values_iter(&'r self) -> Self::BatchValuesIter {
         std::iter::once(&self.0).into()
@@ -946,7 +956,7 @@ macro_rules! impl_batch_values_for_tuple {
     ( $($Ti:ident),* ; $($FieldI:tt),* ; $TupleSize:tt) => {
         impl<'r, $($Ti),+> BatchValuesGatWorkaround<'r> for ($($Ti,)+)
         where
-            $($Ti: ValueList),+
+            $($Ti: ValueList + Send + Sync),+
         {
             type BatchValuesIter = TupleValuesIter<'r, ($($Ti,)+)>;
             fn batch_values_iter(&'r self) -> Self::BatchValuesIter {
