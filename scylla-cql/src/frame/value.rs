@@ -216,8 +216,8 @@ impl<'a> Iterator for SerializedValuesIterator<'a> {
 }
 
 /// Represents List of ValueList for Batch statement
-pub trait BatchValues {
-    type BatchValuesIter<'r>: BatchValuesIterator<'r>
+pub trait BatchValues: Send + Sync {
+    type BatchValuesIter<'r>: BatchValuesIterator<'r> + Send + Sync + 'r
     where
         Self: 'r;
     fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r>;
@@ -229,7 +229,7 @@ pub trait BatchValues {
 /// `BatchValuesIteratorFromIterator<IT>`
 ///
 /// It's just essentially making methods from `ValueList` accessible while allowing iterating.
-pub trait BatchValuesIterator<'a> {
+pub trait BatchValuesIterator<'a>: Send + Sync {
     fn next_serialized(&mut self) -> Option<SerializedResult<'a>>;
     fn write_next_to_request(
         &mut self,
@@ -250,6 +250,7 @@ impl<'r, 'a: 'r, IT, VL> BatchValuesIterator<'r> for BatchValuesIteratorFromIter
 where
     IT: Iterator<Item = &'a VL>,
     VL: ValueList + 'a,
+    Self: Send + Sync,
 {
     fn next_serialized(&mut self) -> Option<SerializedResult<'r>> {
         self.it.next().map(|vl| vl.serialized())
@@ -899,6 +900,7 @@ impl<'a, IT, VL> BatchValues for BatchValuesFromIter<'a, IT>
 where
     IT: Iterator<Item = &'a VL> + Clone,
     VL: ValueList + 'a,
+    IT: Send + Sync,
 {
     type BatchValuesIter<'r> = BatchValuesIteratorFromIterator<IT> where Self: 'r;
     fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r> {
@@ -907,7 +909,10 @@ where
 }
 
 // Implement BatchValues for slices of ValueList types
-impl<T: ValueList> BatchValues for [T] {
+impl<T: ValueList> BatchValues for [T]
+where
+    T: Send + Sync,
+{
     type BatchValuesIter<'r> = BatchValuesIteratorFromIterator<std::slice::Iter<'r, T>> where Self: 'r;
     fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r> {
         self.iter().into()
@@ -915,7 +920,10 @@ impl<T: ValueList> BatchValues for [T] {
 }
 
 // Implement BatchValues for Vec<ValueList>
-impl<T: ValueList> BatchValues for Vec<T> {
+impl<T: ValueList> BatchValues for Vec<T>
+where
+    T: Send + Sync,
+{
     type BatchValuesIter<'r> = BatchValuesIteratorFromIterator<std::slice::Iter<'r, T>> where Self: 'r;
     fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r> {
         BatchValues::batch_values_iter(self.as_slice())
@@ -924,7 +932,10 @@ impl<T: ValueList> BatchValues for Vec<T> {
 
 // Here is an example implementation for (T0, )
 // Further variants are done using a macro
-impl<T0: ValueList> BatchValues for (T0,) {
+impl<T0: ValueList> BatchValues for (T0,)
+where
+    T0: Send + Sync,
+{
     type BatchValuesIter<'r> = BatchValuesIteratorFromIterator<std::iter::Once<&'r T0>> where Self: 'r;
     fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r> {
         std::iter::once(&self.0).into()
@@ -940,7 +951,7 @@ macro_rules! impl_batch_values_for_tuple {
     ( $($Ti:ident),* ; $($FieldI:tt),* ; $TupleSize:tt) => {
         impl<$($Ti),+> BatchValues for ($($Ti,)+)
         where
-            $($Ti: ValueList),+
+            $($Ti: ValueList + Send + Sync),+
         {
             type BatchValuesIter<'r> = TupleValuesIter<'r, ($($Ti,)+)> where Self: 'r;
             fn batch_values_iter<'r>(&'r self) -> Self::BatchValuesIter<'r> {
@@ -952,7 +963,7 @@ macro_rules! impl_batch_values_for_tuple {
         }
         impl<'r, $($Ti),+> BatchValuesIterator<'r> for TupleValuesIter<'r, ($($Ti,)+)>
         where
-            $($Ti: ValueList),+
+            $($Ti: ValueList + Send + Sync),+
         {
             fn next_serialized(&mut self) -> Option<SerializedResult<'r>> {
                 let serialized_value_res = match self.idx {
