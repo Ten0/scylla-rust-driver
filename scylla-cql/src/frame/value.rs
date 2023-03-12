@@ -251,6 +251,8 @@ pub trait BatchValuesIterator<'a> {
 ///
 /// Essentially used internally by this lib to provide implementors of `BatchValuesIterator` for cases
 /// that always serialize the same concrete `ValueList` type
+///
+/// You should not need to use this directly
 pub struct BatchValuesIteratorFromIterator<IT: Iterator> {
     it: IT,
 }
@@ -274,10 +276,10 @@ where
     }
 }
 
-impl<IT> From<IT> for BatchValuesIteratorFromIterator<IT>
+impl<'a, IT, VL> From<IT> for BatchValuesIteratorFromIterator<IT>
 where
-    IT: Iterator,
-    IT::Item: ValueList,
+    IT: Iterator<Item = &'a VL>,
+    VL: ValueList + 'a,
 {
     fn from(it: IT) -> Self {
         BatchValuesIteratorFromIterator { it }
@@ -862,6 +864,9 @@ impl_value_list_for_tuple!(T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12
 impl<T: ValueList> ValueList for &T {
     fn serialized(&self) -> SerializedResult<'_> {
         <T as ValueList>::serialized(*self)
+    }
+    fn write_to_request(&self, buf: &mut impl BufMut) -> Result<(), SerializeValuesError> {
+        <T as ValueList>::write_to_request(self, buf)
     }
 }
 
